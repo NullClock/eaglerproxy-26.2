@@ -20,6 +20,8 @@ export default class SCIdentifyPacket implements Packet {
   version = PROXY_VERSION;
 
   public serialize() {
+    // Eaglercraft 26.2 (Protocol V5) IdentifyServer packet format:
+    // [packetId: 0x02] [protocolVer: Short] [gameVersion: Short] [brand: String] [version: String] [0x00, 0x00, 0x00]
     return Buffer.concat(
       [
         [0x02],
@@ -40,6 +42,7 @@ export default class SCIdentifyPacket implements Packet {
       gameVer = MineProtocol.readShort(protoVer.newBuffer),
       branding = MineProtocol.readString(gameVer.newBuffer),
       version = MineProtocol.readString(branding.newBuffer);
+    this.protocolVer = protoVer.value;
     this.gameVersion = gameVer.value;
     this.branding = branding.value;
     this.version = version.value;

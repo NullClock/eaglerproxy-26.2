@@ -1,15 +1,24 @@
 export namespace Enums {
   export enum PacketId {
+    // Legacy 1.8.9 packets
     CSLoginPacket = 0x01,
     SCIdentifyPacket = 0x02,
-    SCDisconnectPacket = 0xff,
-    SCChannelMessagePacket = 0x3f,
-    CSChannelMessagePacket = 0x17,
     CSUsernamePacket = 0x04,
     SCSyncUuidPacket = 0x05,
     CSSetSkinPacket = 0x07,
     CSReadyPacket = 0x08,
     SCReadyPacket = 0x09,
+    SCDisconnectPacket = 0xff,
+    SCChannelMessagePacket = 0x3f,
+    CSChannelMessagePacket = 0x17,
+    
+    // Eaglercraft 26.2 (Protocol V5) packets
+    CSIdentifyPacketV5 = 0x01,  // Client -> Server: Identify with protocol versions
+    SCIdentifyPacketV5 = 0x02,  // Server -> Client: Selected protocol versions
+    CSLoginPacketV5 = 0x04,     // Client -> Server: Login with username
+    SCLoginAckPacketV5 = 0x05,  // Server -> Client: Login acknowledged with UUID
+    CSReadyPacketV5 = 0x08,     // Client -> Server: Ready to play
+    SCCompleteHandshakeV5 = 0x09, // Server -> Client: Handshake complete
   }
 
   export enum ChannelMessageType {

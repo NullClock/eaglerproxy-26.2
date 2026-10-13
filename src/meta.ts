@@ -7,5 +7,7 @@ export const BRIDGE_VERSION: Readonly<number> = f(1);
 export const PROXY_BRANDING: Readonly<string> = f("EaglerProxy");
 export const PROXY_VERSION: Readonly<string> = f("1.1.0");
 
-export const NETWORK_VERSION: Readonly<number> = f(0x03);
-export const VANILLA_PROTOCOL_VERSION: Readonly<number> = f(47);
+// Eaglercraft 26.2 uses Eaglercraft WebSocket Extension Protocol V5
+export const NETWORK_VERSION: Readonly<number> = f(5);
+// Eaglercraft 26.2 connects to vanilla Minecraft 26.2 servers using protocol 776
+export const VANILLA_PROTOCOL_VERSION: Readonly<number> = f(776);

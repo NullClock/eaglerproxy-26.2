@@ -41,28 +41,33 @@ export class Player extends EventEmitter {
     this.username = playerName;
     this.serverConnection = serverConnection;
     if (this.username != null) this.uuid = Util.generateUUIDFromPlayer(this.username);
+    
+    // Use 1.21.4 (protocol 769) for Eaglercraft 26.2 compatibility
+    // Note: minecraft-protocol doesn't support 776 yet
+    const serializerVersion = "1.21.4";
+    
     this.serverSerializer = createSerializer({
       state: states.PLAY,
       isServer: true,
-      version: "1.8.9",
+      version: serializerVersion,
       customPackets: null,
     });
     this.clientSerializer = createSerializer({
       state: states.PLAY,
       isServer: false,
-      version: "1.8.9",
+      version: serializerVersion,
       customPackets: null,
     });
     this.serverDeserializer = createDeserializer({
       state: states.PLAY,
       isServer: true,
-      version: "1.8.9",
+      version: serializerVersion,
       customPackets: null,
     });
-    this.clientDeserializer = createSerializer({
+    this.clientDeserializer = createDeserializer({
       state: states.PLAY,
-      isServer: true,
-      version: "1.8.9",
+      isServer: false,
+      version: serializerVersion,
       customPackets: null,
     });
   }
@@ -167,10 +172,16 @@ export class Player extends EventEmitter {
   public async connect(options: ClientOptions) {
     if (this._alreadyConnected) throw new Error(`Invalid state: Player has already been connected to a server, and .connect() was just called. Please use switchServers() instead.`);
     this._alreadyConnected = true;
+    
+    // Eaglercraft 26.2 uses Minecraft protocol 776
+    // minecraft-protocol currently supports up to 1.21.4 (protocol 769)
+    // For full 776 support, a custom protocol implementation would be needed
+    const connectVersion = options.version || "1.21.4";
+    
     this.serverConnection = createClient(
       Object.assign(
         {
-          version: "1.8.9",
+          version: connectVersion,
           keepAlive: false,
           hideErrors: false,
         },
@@ -212,10 +223,11 @@ export class Player extends EventEmitter {
         })
       );
 
+      const connectVersion = options.version || "1.21.4";
       this.serverConnection = createClient(
         Object.assign(
           {
-            version: "1.8.9",
+            version: connectVersion,
             keepAlive: false,
             hideErrors: false,
           },

@@ -28,6 +28,14 @@ import { PluginManager } from "./pluginLoader/PluginManager.js";
 import ProxyRatelimitManager from "./ratelimit/ProxyRatelimitManager.js";
 import { SkinServer } from "./skins/SkinServer.js";
 
+// Eaglercraft 26.2 (Protocol V5) packets
+import CSIdentifyPacketV5 from "./packets/CSIdentifyPacketV5.js";
+import SCIdentifyPacketV5 from "./packets/SCIdentifyPacketV5.js";
+import CSLoginPacketV5 from "./packets/CSLoginPacketV5.js";
+import SCLoginAckPacketV5 from "./packets/SCLoginAckPacketV5.js";
+import CSReadyPacketV5 from "./packets/CSReadyPacketV5.js";
+import SCCompleteHandshakeV5 from "./packets/SCCompleteHandshakeV5.js";
+
 let instanceCount = 0;
 const chalk = new Chalk({ level: 2 });
 const motdMatcher = /^accept: motd/i;
@@ -250,72 +258,41 @@ export class Proxy extends EventEmitter {
           return;
         }
 
-        const loginPacket = new CSLoginPacket().deserialize(firstPacket);
-        player.state = Enums.ClientState.PRE_HANDSHAKE;
-        if (loginPacket.gameVersion != VANILLA_PROTOCOL_VERSION) {
-          player.disconnect(`${Enums.ChatColor.RED}Please connect to this proxy on EaglercraftX 1.8.9.`);
-          return;
-        } else if (loginPacket.networkVersion != NETWORK_VERSION) {
-          player.disconnect(`${Enums.ChatColor.RED}Your EaglercraftX version is too ${loginPacket.networkVersion > NETWORK_VERSION ? "new" : "old"}! Please ${loginPacket.networkVersion > NETWORK_VERSION ? "downgrade" : "update"}.`);
-          return;
-        }
-        try {
-          Util.validateUsername(loginPacket.username);
-        } catch (err) {
-          player.disconnect(`${Enums.ChatColor.RED}${err.reason || err}`);
-          return;
-        }
-        player.username = loginPacket.username;
-        player.uuid = Util.generateUUIDFromPlayer(player.username);
-        if (this.players.size > this.config.maxConcurrentClients) {
-          player.disconnect(`${Enums.ChatColor.YELLOW}Proxy is full! Please try again later.`);
-          return;
-        } else if (this.players.get(player.username) != null || this.players.get(`!phs.${player.uuid}`) != null) {
-          player.disconnect(`${Enums.ChatColor.YELLOW}Someone under your username (${player.username}) is already connected to the proxy!`);
-          return;
-        }
-        this.players.set(`!phs.${player.uuid}`, player);
-        this._logger.info(
-          `Player ${loginPacket.username} (${Util.generateUUIDFromPlayer(loginPacket.username)}) running ${loginPacket.brand}/${loginPacket.version} (net ver: ${loginPacket.networkVersion}, game ver: ${
-            loginPacket.gameVersion
-          }) is attempting to connect!`
-        );
-        player.write(new SCIdentifyPacket());
-        const usernamePacket: CSUsernamePacket = (await player.read(Enums.PacketId.CSUsernamePacket)) as any;
-        if (usernamePacket.username !== player.username) {
-          player.disconnect(`${Enums.ChatColor.YELLOW}Failed to complete handshake. Your game version may be too old or too new.`);
-          return;
-        }
-        const syncUuid = new SCSyncUuidPacket();
-        syncUuid.username = player.username;
-        syncUuid.uuid = player.uuid;
-        player.write(syncUuid);
+        // Detect protocol version from first packet
+        // Legacy (1.8.9): First packet is CSLoginPacket (0x01) with networkVersion = 3
+        // V5 (26.2): First packet is CSIdentifyPacketV5 (0x01) with list of supported protocols
+        const firstPacketId = firstPacket[0];
+        let isV5Protocol = false;
+        let identifyPacketV5: CSIdentifyPacketV5 | null = null;
 
-        const prom = await Promise.all([player.read(Enums.PacketId.CSReadyPacket), (await player.read(Enums.PacketId.CSSetSkinPacket)) as CSSetSkinPacket]),
-          skin = prom[1],
-          obj = new EaglerSkins.EaglerSkin();
-        obj.owner = player;
-        obj.type = skin.skinType as any;
-        if (skin.skinType == Enums.SkinType.CUSTOM) obj.skin = skin.skin;
-        else obj.builtInSkin = skin.skinId;
-        player.skin = obj;
+        if (firstPacketId === Enums.PacketId.CSLoginPacket) {
+          // Could be either legacy or V5 - check the second byte
+          // Legacy: second byte is 0x02, then network version as Short
+          // V5: second byte is count of Eagler protocols (as Short)
+          if (firstPacket.length >= 3) {
+            // In legacy, second byte is 0x02 (sub-protocol marker)
+            // In V5, second byte is the count of supported Eagler protocols
+            // We can check if the client supports protocol 5
+            try {
+              // Try to parse as V5 identify packet
+              const testIdentify = new CSIdentifyPacketV5().deserialize(firstPacket);
+              if (testIdentify.supportedEaglerProtocols.includes(5)) {
+                isV5Protocol = true;
+                identifyPacketV5 = testIdentify;
+              }
+            } catch {
+              // Not V5, will parse as legacy
+            }
+          }
+        }
 
-        player.write(new SCReadyPacket());
-        this.players.delete(`!phs.${player.uuid}`);
-        this.players.set(player.username, player);
-        player.initListeners();
-        this._bindListenersToPlayer(player);
-        player.state = Enums.ClientState.POST_HANDSHAKE;
-        this._logger.info(`Handshake Success! Connecting player ${player.username} to server...`);
-        handled = true;
-
-        await player.connect({
-          host: this.config.server.host,
-          port: this.config.server.port,
-          username: player.username,
-        });
-        this._logger.info(`Player ${player.username} successfully connected to server.`);
-        this.emit("playerConnect", player);
+        if (isV5Protocol && identifyPacketV5) {
+          // Handle Eaglercraft 26.2 (Protocol V5) handshake
+          await this._handleV5Handshake(player, identifyPacketV5, firstPacket);
+        } else {
+          // Handle legacy EaglercraftX 1.8.9 handshake
+          await this._handleLegacyHandshake(player, firstPacket);
+        }
       }
     } catch (err) {
       this.initalHandlerLogger.warn(`Error occurred whilst handling handshake: ${err.stack ?? err}`);
@@ -323,6 +300,205 @@ export class Proxy extends EventEmitter {
       ws.close();
       if (player && player.uuid && this.players.has(`!phs.${player.uuid}`)) this.players.delete(`!phs.${player.uuid}`);
       if (player && player.uuid && this.players.has(player.username)) this.players.delete(player.username);
+    }
+  }
+
+  /**
+   * Handle Eaglercraft 26.2 (Protocol V5) handshake
+   * Flow:
+   * 1. Client -> Server: IdentifyClient (0x01) with supported protocol versions
+   * 2. Server -> Client: IdentifyServer (0x02) with selected protocol versions
+   * 3. Client -> Server: Login (0x04) with username
+   * 4. Server -> Client: LoginAck (0x05) with username and UUID
+   * 5. Client -> Server: ClientReady (0x08)
+   * 6. Server -> Client: CompleteHandshake (0x09)
+   */
+  private async _handleV5Handshake(player: Player, identifyPacket: CSIdentifyPacketV5, firstPacket: Buffer) {
+    try {
+      player.state = Enums.ClientState.PRE_HANDSHAKE;
+      
+      // Select best protocol version
+      const selected = identifyPacket.selectBestProtocol();
+      this._logger.info(
+        `Player ${identifyPacket.brand}/${identifyPacket.version} supports Eagler protocols: [${identifyPacket.supportedEaglerProtocols.join(", ")}], MC protocols: [${identifyPacket.supportedMcProtocols.slice(0, 5).join(", ")}...]`
+      );
+      this._logger.info(`Selected Eagler protocol: ${selected.eaglerProtocol}, MC protocol: ${selected.mcProtocol}`);
+      
+      // Send IdentifyServer with selected protocol
+      const identifyServer = new SCIdentifyPacketV5();
+      identifyServer.selectedEaglerProtocol = selected.eaglerProtocol;
+      identifyServer.selectedMcProtocol = selected.mcProtocol;
+      identifyServer.branding = PROXY_BRANDING;
+      identifyServer.version = PROXY_VERSION;
+      // Add standard capabilities (skin, cape, voice, etc.)
+      identifyServer.capabilities = 0x7F; // All basic capabilities
+      identifyServer.capabilityVersions = [1, 1, 1, 1, 1, 1, 1];
+      player.write(identifyServer);
+      
+      // Wait for Login packet
+      const loginPacket = await player.read(Enums.PacketId.CSLoginPacketV5) as CSLoginPacketV5;
+      if (!loginPacket) {
+        player.disconnect(`${Enums.ChatColor.RED}Login timeout`);
+        return;
+      }
+      
+      try {
+        Util.validateUsername(loginPacket.username);
+      } catch (err) {
+        player.disconnect(`${Enums.ChatColor.RED}${err.reason || err}`);
+        return;
+      }
+      
+      player.username = loginPacket.username;
+      player.uuid = Util.generateUUIDFromPlayer(player.username);
+      
+      if (this.players.size > this.config.maxConcurrentClients) {
+        player.disconnect(`${Enums.ChatColor.YELLOW}Proxy is full! Please try again later.`);
+        return;
+      } else if (this.players.get(player.username) != null || this.players.get(`!phs.${player.uuid}`) != null) {
+        player.disconnect(`${Enums.ChatColor.YELLOW}Someone under your username (${player.username}) is already connected to the proxy!`);
+        return;
+      }
+      
+      this.players.set(`!phs.${player.uuid}`, player);
+      this._logger.info(`Player ${player.username} (${player.uuid}) authenticated with Eaglercraft 26.2 (V5)`);
+      
+      // Send LoginAck with username and UUID
+      const loginAck = new SCLoginAckPacketV5();
+      loginAck.username = player.username;
+      loginAck.uuid = player.uuid;
+      loginAck.standardCapabilities = identifyServer.capabilities;
+      loginAck.capabilityVersions = identifyServer.capabilityVersions;
+      player.write(loginAck);
+      
+      // Wait for ClientReady
+      const readyPacket = await player.read(Enums.PacketId.CSReadyPacketV5);
+      if (!readyPacket) {
+        player.disconnect(`${Enums.ChatColor.RED}Ready timeout`);
+        return;
+      }
+      
+      // Read skin packet (optional)
+      let skinPacket: CSSetSkinPacket | null = null;
+      try {
+        skinPacket = (await player.read(Enums.PacketId.CSSetSkinPacket)) as CSSetSkinPacket;
+      } catch {
+        // Skin packet is optional
+      }
+      
+      const obj = new EaglerSkins.EaglerSkin();
+      obj.owner = player;
+      if (skinPacket) {
+        obj.type = skinPacket.skinType as any;
+        if (skinPacket.skinType == Enums.SkinType.CUSTOM) obj.skin = skinPacket.skin;
+        else obj.builtInSkin = skinPacket.skinId;
+      }
+      player.skin = obj;
+      
+      // Send CompleteHandshake
+      player.write(new SCCompleteHandshakeV5());
+      
+      this.players.delete(`!phs.${player.uuid}`);
+      this.players.set(player.username, player);
+      player.initListeners();
+      this._bindListenersToPlayer(player);
+      player.state = Enums.ClientState.POST_HANDSHAKE;
+      this._logger.info(`V5 Handshake Success! Connecting player ${player.username} to server...`);
+      
+      // Connect to backend server using protocol 776
+      await player.connect({
+        host: this.config.server.host,
+        port: this.config.server.port,
+        username: player.username,
+        version: "1.21.4", // This will use the highest supported protocol (769)
+        // Note: minecraft-protocol doesn't support 776 yet, so we use 1.21.4 (769)
+        // For full 776 support, we'd need a custom protocol implementation
+      });
+      this._logger.info(`Player ${player.username} successfully connected to server.`);
+      this.emit("playerConnect", player);
+    } catch (err) {
+      this.initalHandlerLogger.warn(`Error occurred whilst handling V5 handshake: ${err.stack ?? err}`);
+      if (player && player.uuid && this.players.has(`!phs.${player.uuid}`)) this.players.delete(`!phs.${player.uuid}`);
+      if (player && player.uuid && this.players.has(player.username)) this.players.delete(player.username);
+      player?.ws?.close();
+    }
+  }
+
+  /**
+   * Handle legacy EaglercraftX 1.8.9 handshake
+   */
+  private async _handleLegacyHandshake(player: Player, firstPacket: Buffer) {
+    try {
+      const loginPacket = new CSLoginPacket().deserialize(firstPacket);
+      player.state = Enums.ClientState.PRE_HANDSHAKE;
+      if (loginPacket.gameVersion != VANILLA_PROTOCOL_VERSION) {
+        player.disconnect(`${Enums.ChatColor.RED}Please connect to this proxy on EaglercraftX 1.8.9.`);
+        return;
+      } else if (loginPacket.networkVersion != NETWORK_VERSION) {
+        player.disconnect(`${Enums.ChatColor.RED}Your EaglercraftX version is too ${loginPacket.networkVersion > NETWORK_VERSION ? "new" : "old"}! Please ${loginPacket.networkVersion > NETWORK_VERSION ? "downgrade" : "update"}.`);
+        return;
+      }
+      try {
+        Util.validateUsername(loginPacket.username);
+      } catch (err) {
+        player.disconnect(`${Enums.ChatColor.RED}${err.reason || err}`);
+        return;
+      }
+      player.username = loginPacket.username;
+      player.uuid = Util.generateUUIDFromPlayer(player.username);
+      if (this.players.size > this.config.maxConcurrentClients) {
+        player.disconnect(`${Enums.ChatColor.YELLOW}Proxy is full! Please try again later.`);
+        return;
+      } else if (this.players.get(player.username) != null || this.players.get(`!phs.${player.uuid}`) != null) {
+        player.disconnect(`${Enums.ChatColor.YELLOW}Someone under your username (${player.username}) is already connected to the proxy!`);
+        return;
+      }
+      this.players.set(`!phs.${player.uuid}`, player);
+      this._logger.info(
+        `Player ${loginPacket.username} (${Util.generateUUIDFromPlayer(loginPacket.username)}) running ${loginPacket.brand}/${loginPacket.version} (net ver: ${loginPacket.networkVersion}, game ver: ${
+          loginPacket.gameVersion
+        }) is attempting to connect!`
+      );
+      player.write(new SCIdentifyPacket());
+      const usernamePacket: CSUsernamePacket = (await player.read(Enums.PacketId.CSUsernamePacket)) as any;
+      if (usernamePacket.username !== player.username) {
+        player.disconnect(`${Enums.ChatColor.YELLOW}Failed to complete handshake. Your game version may be too old or too new.`);
+        return;
+      }
+      const syncUuid = new SCSyncUuidPacket();
+      syncUuid.username = player.username;
+      syncUuid.uuid = player.uuid;
+      player.write(syncUuid);
+
+      const prom = await Promise.all([player.read(Enums.PacketId.CSReadyPacket), (await player.read(Enums.PacketId.CSSetSkinPacket)) as CSSetSkinPacket]),
+        skin = prom[1],
+        obj = new EaglerSkins.EaglerSkin();
+      obj.owner = player;
+      obj.type = skin.skinType as any;
+      if (skin.skinType == Enums.SkinType.CUSTOM) obj.skin = skin.skin;
+      else obj.builtInSkin = skin.skinId;
+      player.skin = obj;
+
+      player.write(new SCReadyPacket());
+      this.players.delete(`!phs.${player.uuid}`);
+      this.players.set(player.username, player);
+      player.initListeners();
+      this._bindListenersToPlayer(player);
+      player.state = Enums.ClientState.POST_HANDSHAKE;
+      this._logger.info(`Handshake Success! Connecting player ${player.username} to server...`);
+
+      await player.connect({
+        host: this.config.server.host,
+        port: this.config.server.port,
+        username: player.username,
+      });
+      this._logger.info(`Player ${player.username} successfully connected to server.`);
+      this.emit("playerConnect", player);
+    } catch (err) {
+      this.initalHandlerLogger.warn(`Error occurred whilst handling handshake: ${err.stack ?? err}`);
+      if (player && player.uuid && this.players.has(`!phs.${player.uuid}`)) this.players.delete(`!phs.${player.uuid}`);
+      if (player && player.uuid && this.players.has(player.username)) this.players.delete(player.username);
+      player?.ws?.close();
     }
   }
 
